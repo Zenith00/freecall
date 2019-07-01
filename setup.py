@@ -4,7 +4,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-        name="Freecall",
+        name="freecall",
         version="0.0.1",
         author="Zenith00",
         author_email="Zenith00dev@gmail.com",
