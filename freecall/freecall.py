@@ -5,6 +5,8 @@ import shelve
 import sys
 import zlib
 import dill
+import dbm
+import traceback
 
 __CACHE_NAME__ = "freecall.shelf"
 
@@ -22,7 +24,9 @@ def _parameterize_deco(deco_to_replace):
     def deco_replacement(*args, **kwargs):
         def func_replacement(func_to_replace):
             return deco_to_replace(func_to_replace, *args, **kwargs)
+
         return func_replacement
+
     return deco_replacement
 
 
@@ -48,47 +52,52 @@ def cache(func, force_hot: bool = False, history_limit: int = 5, disable_cache: 
 
         None if not force_hot_ else logging.debug(f"Calling [{func.__name__}] forcibly hot")
         func_name = func.__name__
-        shelf = shelve.open("freecall.shelf")
+        try:
+            shelf = shelve.open(__CACHE_NAME__)
+        except dbm.error:
+            shelf = shelve.open(__CACHE_NAME__, "r")
+            logging.warning(f"{traceback.format_exc()}\nFalling back to read-only mode")
         logging.debug("Loaded cache ")
         if "__meta_history" not in shelf:
             logging.info(f"First run, initializing shelf")
-            call_histories = {}
-        else:
-            call_histories = shelf["__meta_history"]  # [freecall.shelf:__meta_history][0][R]
-        if func_name not in call_histories:
-            call_histories[func_name] = []
+            shelf["__meta_history"] = {}
+
+        meta_history = shelf["__meta_history"]
+        if func_name not in meta_history:
+            meta_history[func_name] = []
 
         try:
             call_parts = (func, args, kwargs)
             call_hash = str(zlib.adler32(json.dumps(call_parts, default=_checksum_dump, sort_keys=True).encode('utf-8')) & 0xffffffff)
-            logging.debug(f"Call hash successfully computed: {call_hash}")
-            hot = force_hot_ or call_hash not in call_histories[func_name]
+            logging.debug(f"[{func_name}]Call hash successfully computed: {call_hash}")
+            hot = force_hot_ or call_hash not in meta_history[func_name]
         except dill.PicklingError as err:
-            logging.warning(f"Calling cached function [{func_name}] with invalid arguments. Defaulting to HOT. Pickle error: \n {err}")
+            logging.warning(f"[{func_name}] Calling cached function with invalid arguments. Defaulting to HOT. Pickle error: \n {err}")
             hot = True
             call_hash = None
 
         if hot:
-            call_history = call_histories[func_name]
-            logging.debug(f"Function [{func_name}] hot, calling function")
+            logging.debug(f"[{func_name}] is hot, calling function")
+            shelf["__meta_history"] = meta_history
+            shelf.close()
             func_result = func(*args, **kwargs)
-            if call_hash is not None and call_hash not in call_history:
-                call_history.append(call_hash)
+            shelf = shelve.open(__CACHE_NAME__)
+            meta_history = shelf["__meta_history"]
+            if call_hash is not None and call_hash not in meta_history[func_name]:
+                meta_history[func_name].append(call_hash)
                 # Forget old calls
-                if len(call_history) > history_limit:
-                    for call_to_forget in call_history[:-history_limit]:
+                if len(meta_history[func_name]) > history_limit:
+                    for call_to_forget in meta_history[func_name][:-history_limit]:
                         del shelf[call_to_forget]
-                    call_history = call_history[-history_limit_:]
                 # Cache new call
                 shelf[call_hash] = func_result
-                call_histories[func_name] = call_history
-                logging.debug(f"Saving call to [{func_name}] at call hash [{call_hash}]")
+                shelf["__meta_history"] = meta_history
+                logging.debug(f"[{func_name}] Saving call with call hash [{call_hash}]")
 
         else:
-            logging.debug(f"Function [{func_name}] already saved with call hash {call_hash}, loading")
+            logging.debug(f"[{func_name}] already saved with call hash {call_hash}, loading")
             func_result = shelf[call_hash]
 
-        shelf["__meta_history"] = call_histories  # [freecall.shelf:__meta_history][0][W]
         shelf.close()
         return func_result
 
